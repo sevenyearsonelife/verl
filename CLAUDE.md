@@ -15,6 +15,7 @@ verl 采用 **Hybrid Controller** 架构，解耦计算与数据依赖：
 - **Single Controller**: 基于 Ray 的统一分布式控制器（`verl/trainer/main_ppo.py`）
 - **Workers**: 执行具体计算的 Worker 进程（`verl/workers/`）
 - **DataProto**: 基于 TensorDict 的统一数据传输协议（`verl/protocol.py`）
+- **SingleController**: 位于 `verl/single_controller/`，提供 Worker 管理和远程方法调度
 
 ### 核心目录结构
 
@@ -32,19 +33,28 @@ verl/
 │   ├── actor/                # Actor 模型
 │   ├── critic/               # Critic 模型
 │   ├── rollout/              # Rollout 采样
-│   └── reward_manager/       # 奖励函数管理
+│   ├── engine/               # 推理引擎注册
+│   ├── reward_manager/       # 奖励函数管理
+│   └── config/               # Worker 配置类
+├── single_controller/    # 单控制器架构
+│   ├── base/              # Worker 基类和装饰器
+│   ├── decorator.py       # @register 装饰器定义
+│   └── ...                # 控制器实现
 ├── protocol.py           # DataProto 数据协议
 ├── base_config.py        # 配置基类
+├── experimental/         # 实验性功能
+├── checkpoint_engine/    # 检查点引擎
 └── utils/                # 工具库（50+ 模块）
 ```
 
 ### Worker 架构模式
 
-所有 Worker 继承自 `verl/workers/base_worker.py`，使用 `@register` 装饰器定义远程方法：
+所有 Worker 继承自 `verl.single_controller.base.Worker`，使用 `@register` 装饰器定义远程方法：
 
 ```python
 from verl.protocol import DataProto
-from verl.utils.py_functional import register_dispatch_mode
+from verl.single_controller.base import Worker
+from verl.single_controller.base.decorator import register, Dispatch
 
 class MyWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -55,9 +65,14 @@ class MyWorker(Worker):
 
 **主要 Worker 类型**：
 - `ActorRolloutRefWorker`: Actor + Rollout + Reference 混合引擎
-- `FSDPTrainingWorker`: FSDP 训练后端
-- `MegatronTrainingWorker`: Megatron 训练后端
+- `TrainingWorker`: 通用训练 Worker（FSDP/FSDP2/Megatron）
 - `RewardModelWorker`: 奖励模型 Worker
+
+**Dispatch 模式**：
+- `RANK_ZERO`: 仅在 rank 0 执行
+- `ONE_TO_ALL`: 从 rank 0 广播到所有 ranks
+- `ALL_TO_ALL`: 所有 ranks 参与计算
+- `DP_COMPUTE`: 数据并行计算模式
 
 ### 配置系统
 
@@ -249,6 +264,22 @@ mapping = {
 }
 ```
 
+## 检查点引擎
+
+verl 支持多种检查点引擎后端，通过 `CheckpointEngineRegistry` 管理：
+
+- **CheckpointEngine**: 基础检查点引擎
+- **NCCLCheckpointEngine**: NVIDIA GPU 检查点引擎（NCCL）
+- **HCCLCheckpointEngine**: 华为 NPU 检查点引擎（HCCL）
+- **NIXLCheckpointEngine**: NVIDIA NIXL 检查点引擎
+- **KIMICheckpointEngine**: Kimi 检查点引擎
+
+配置示例：
+```yaml
+actor_rollout_ref.actor.checkpoint_engine.name: "nccl"
+critic.checkpoint_engine.name: "nccl"
+```
+
 ## 支持的训练后端
 
 ### FSDP/FSDP2
@@ -305,11 +336,29 @@ SGLang 提供独特功能：
 
 ### 前沿算法（recipe 子模块）
 
+recipe 目录已迁移到独立仓库 [verl-recipe](https://github.com/verl-project/verl-recipe)，使用前需要初始化子模块：
+```bash
+git submodule update --init --recursive recipe
+```
+
+包含算法：
 - **DAPO**: SOTA 数学推理 RL 算法
 - **PF-PPO**: Policy Filtration PPO（ICML 2025）
 - **VAPO**: Value-based Augmented PPO
 - **PRIME**: Process Reinforcement through Implicit Rewards
 - **DrGRPO**: Direct GRPO
+
+### 实验性功能（verl/experimental）
+
+以下实验性功能保留在主库中，可通过 `verl.experimental.{module}` 导入：
+
+- **agent_loop**: Agent 集成和训练循环
+- **fully_async_policy**: 全异步策略架构
+- **one_step_off_policy**: 一步离线策略
+- **transfer_queue**: 传输队列优化
+- **vla**: Vision-Language-Action 模型支持
+- **reward_loop**: 奖励循环优化
+- **separation**: 分离式训练架构
 
 ## 性能优化特性
 
