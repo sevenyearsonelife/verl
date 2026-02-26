@@ -63,6 +63,8 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 image_data=images,
                 video_data=videos,
             )
+        if metrics.get("num_preempted") is None:
+            metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
         response_mask = [1] * len(output.token_ids)
 
         output = AgentLoopOutput(
@@ -79,4 +81,8 @@ class SingleTurnAgentLoop(AgentLoopBase):
             num_turns=2,
             metrics=metrics,
         )
+
+        # keeping the schema consistent with tool_agent_loop
+        output.extra_fields.update({"turn_scores": [], "tool_rewards": []})
+
         return output

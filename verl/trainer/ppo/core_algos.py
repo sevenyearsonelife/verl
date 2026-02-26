@@ -348,7 +348,7 @@ def compute_grpo_vectorized_outcome_advantage(
     with torch.no_grad():
         scores = token_level_rewards.sum(dim=-1)
         g = as_torch_index(index, device=scores.device)
-        mean_g, std_g, _ = group_mean_std(scores, g, eps=epsilon)
+        mean_g, std_g, _ = group_mean_std(scores, g, eps=epsilon, device=scores.device)
         if norm_adv_by_std_in_grpo:
             scalars = (scores - mean_g[g]) / (std_g[g] + epsilon)
         else:
@@ -763,7 +763,7 @@ def compute_optimal_token_baseline_advantage(
     old_log_probs: torch.Tensor,
     sum_pi_squared: torch.Tensor,
     rollout_is_weights: torch.Tensor = None,
-    handle_zero_tail: bool = False,
+    handle_zero_tail: bool = True,
     epsilon: float = 1e-8,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -791,7 +791,7 @@ def compute_optimal_token_baseline_advantage(
             None if not using IS
         handle_zero_tail: If True, zero baselines will be set in the portion of the longest trajectory
             that extends beyond the second-longest trajectory in the prompt group.
-            Default: False
+            Default: True
         epsilon: Small constant for numerical stability (default: 1e-8)
 
     Returns:
@@ -1054,12 +1054,16 @@ def agg_loss(
     """
     if loss_agg_mode == "token-mean":
         if batch_num_tokens is None:
+            if dp_size > 1:
+                raise ValueError("(global) batch_num_tokens is required when dp_size > 1")
             batch_num_tokens = loss_mask.sum()
         loss = verl_F.masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size
     elif loss_agg_mode == "seq-mean-token-sum":
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)  # token-sum
         seq_mask = (torch.sum(loss_mask, dim=-1) > 0).float()  # exclude fully masked sequences
         if global_batch_size is None:
+            if dp_size > 1:
+                raise ValueError("global_batch_size is required when dp_size > 1")
             global_batch_size = seq_mask.sum()
         loss = verl_F.masked_sum(seq_losses, seq_mask) / global_batch_size * dp_size  # seq-mean
     elif loss_agg_mode == "seq-mean-token-mean":
@@ -1067,13 +1071,18 @@ def agg_loss(
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / (seq_mask + 1e-8)  # token-mean
         seq_mask = (seq_mask > 0).float()  # exclude fully masked sequences
         if global_batch_size is None:
+            if dp_size > 1:
+                raise ValueError("global_batch_size is required when dp_size > 1")
             global_batch_size = seq_mask.sum()
         loss = verl_F.masked_sum(seq_losses, seq_mask) / global_batch_size * dp_size  # seq-mean
     elif loss_agg_mode == "seq-mean-token-sum-norm":
-        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)
         if loss_scale_factor is None:
-            loss_scale_factor = loss_mask.shape[-1]
-        loss = torch.sum(seq_losses) / loss_scale_factor
+            raise ValueError(
+                f"{loss_agg_mode=} but {loss_scale_factor=}. "
+                'If not intented for custom scaling factor, try setting loss_agg_mode="seq-mean-token-sum".'
+            )
+        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)
+        loss = torch.sum(seq_losses) / loss_scale_factor * dp_size
     else:
         raise ValueError(f"Invalid loss_agg_mode: {loss_agg_mode}")
 
@@ -2109,10 +2118,8 @@ def compute_policy_loss_bypass_mode(
         loss_type: "ppo_clip" (default) or "reinforce"
         rollout_is: IS aggregation level ("token", "sequence", or None)
         rollout_is_threshold: Upper threshold for truncating IS weights (default: 2.0)
-        rollout_rs: Rejection sampling level ("token", "sequence", "geometric", or None)
-        rollout_rs_threshold: Upper threshold for rejection sampling
-        rollout_rs_threshold_lower: Lower threshold for rejection sampling
-        rollout_token_veto_threshold: Per-token veto threshold for catastrophic outliers
+        rollout_rs: Rejection sampling level (see rollout_corr_helper for supported modes)
+        rollout_rs_threshold: Threshold specification for rejection sampling
         rollout_is_batch_normalize: Whether to normalize IS weights to mean=1.0
 
     Returns:
@@ -2137,11 +2144,9 @@ def compute_policy_loss_bypass_mode(
     loss_type = rollout_corr_config.get("loss_type", "ppo_clip")
     rollout_is = rollout_corr_config.get("rollout_is", None)
     rollout_is_threshold = rollout_corr_config.get("rollout_is_threshold", 2.0)
+    rollout_is_batch_normalize = rollout_corr_config.get("rollout_is_batch_normalize", False)
     rollout_rs = rollout_corr_config.get("rollout_rs", None)
     rollout_rs_threshold = rollout_corr_config.get("rollout_rs_threshold", None)
-    rollout_rs_threshold_lower = rollout_corr_config.get("rollout_rs_threshold_lower", None)
-    rollout_token_veto_threshold = rollout_corr_config.get("rollout_token_veto_threshold", None)
-    rollout_is_batch_normalize = rollout_corr_config.get("rollout_is_batch_normalize", False)
 
     # In bypass mode: old_log_prob IS rollout_log_prob
     rollout_log_prob = old_log_prob
@@ -2156,11 +2161,9 @@ def compute_policy_loss_bypass_mode(
                 response_mask=response_mask,
                 rollout_is=rollout_is,
                 rollout_is_threshold=rollout_is_threshold,
+                rollout_is_batch_normalize=rollout_is_batch_normalize,
                 rollout_rs=rollout_rs,
                 rollout_rs_threshold=rollout_rs_threshold,
-                rollout_rs_threshold_lower=rollout_rs_threshold_lower,
-                rollout_token_veto_threshold=rollout_token_veto_threshold,
-                rollout_is_batch_normalize=rollout_is_batch_normalize,
             )
         )
 
